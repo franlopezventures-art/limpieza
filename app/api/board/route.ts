@@ -90,7 +90,12 @@ export async function POST(request: NextRequest) {
     `;
 
     const shiftId = Number(inserted[0].id);
-    await recordAudit("Cuadrante", shiftId, "asignado", `${locationRows[0]?.name ?? "Portería"} -> ${employeeRows[0]?.name ?? "Trabajador"} · ${shiftDate}`);
+    await recordAudit(
+      "Cuadrante",
+      shiftId,
+      "asignado",
+      `${locationRows[0]?.name ?? "Portería"} -> ${employeeRows[0]?.name ?? "Trabajador"} · ${shiftDate}`
+    );
 
     const assignment = await getShiftRow(shiftId);
     return NextResponse.json({ assignment });
@@ -99,14 +104,50 @@ export async function POST(request: NextRequest) {
   if (action === "move") {
     const shiftId = Number(body.shift_id);
     const employeeId = Number(body.employee_id);
+    const shiftDate = String(body.shift_date ?? "").trim();
 
     if (!shiftId || !employeeId) {
       return NextResponse.json({ error: "Faltan datos para mover la asignación." }, { status: 400 });
     }
 
-    await sql`UPDATE shifts SET employee_id = ${employeeId}, updated_at = NOW() WHERE id = ${shiftId}`;
+    const currentRows = await sql`
+      SELECT location_id, shift_date
+      FROM shifts
+      WHERE id = ${shiftId}
+      LIMIT 1
+    `;
+
+    if (!currentRows[0]) {
+      return NextResponse.json({ error: "La asignación ya no existe." }, { status: 404 });
+    }
+
+    const nextShiftDate = shiftDate || String(currentRows[0].shift_date).slice(0, 10);
+    const conflict = await sql`
+      SELECT id
+      FROM shifts
+      WHERE location_id = ${currentRows[0].location_id}
+        AND shift_date = ${nextShiftDate}
+        AND id <> ${shiftId}
+      LIMIT 1
+    `;
+
+    if (conflict[0]) {
+      return NextResponse.json({ error: "Esa portería ya está ocupada en ese día." }, { status: 409 });
+    }
+
+    await sql`
+      UPDATE shifts
+      SET employee_id = ${employeeId}, shift_date = ${nextShiftDate}, updated_at = NOW()
+      WHERE id = ${shiftId}
+    `;
+
     const assignment = await getShiftRow(shiftId);
-    await recordAudit("Cuadrante", shiftId, "movido", `${assignment?.location_name ?? "Portería"} -> ${assignment?.employee_name ?? "Trabajador"}`);
+    await recordAudit(
+      "Cuadrante",
+      shiftId,
+      "movido",
+      `${assignment?.location_name ?? "Portería"} -> ${assignment?.employee_name ?? "Trabajador"} · ${assignment?.shift_date ?? nextShiftDate}`
+    );
     return NextResponse.json({ assignment });
   }
 

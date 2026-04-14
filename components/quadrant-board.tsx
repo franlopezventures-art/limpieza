@@ -20,7 +20,7 @@ type Props = {
 };
 
 type DragPayload =
-  | { kind: "location"; locationId: number }
+  | { kind: "location"; locationId: number; shiftDate: string }
   | { kind: "assignment"; assignmentId: number };
 
 type AssignmentEditor = {
@@ -54,16 +54,77 @@ export function QuadrantBoard({
   }, [initialShifts]);
 
   const dates = weekDates(weekStart);
-  const selectedIndex = Math.max(0, dates.indexOf(selectedDate));
   const previousWeek = addDays(weekStart, -7);
   const nextWeek = addDays(weekStart, 7);
-  const previousDay = addDays(previousWeek, selectedIndex);
-  const nextDay = addDays(nextWeek, selectedIndex);
 
-  const shiftsForDay = useMemo(
-    () => shifts.filter((shift) => shift.shift_date === selectedDate),
-    [selectedDate, shifts]
-  );
+  const shiftsByEmployeeDay = useMemo(() => {
+    const bucket = new Map<string, Shift[]>();
+
+    for (const shift of shifts) {
+      const key = `${shift.employee_id}-${shift.shift_date}`;
+      const current = bucket.get(key) ?? [];
+      current.push(shift);
+      bucket.set(key, current);
+    }
+
+    for (const [key, value] of bucket.entries()) {
+      bucket.set(
+        key,
+        value.sort((left, right) => {
+          const timeCompare = left.start_time.localeCompare(right.start_time);
+          if (timeCompare !== 0) {
+            return timeCompare;
+          }
+
+          return left.location_name.localeCompare(right.location_name);
+        })
+      );
+    }
+
+    return bucket;
+  }, [shifts]);
+
+  const assignedLocationIdsByDate = useMemo(() => {
+    const bucket = new Map<string, Set<number>>();
+
+    for (const date of dates) {
+      bucket.set(date, new Set<number>());
+    }
+
+    for (const shift of shifts) {
+      const set = bucket.get(shift.shift_date) ?? new Set<number>();
+      set.add(shift.location_id);
+      bucket.set(shift.shift_date, set);
+    }
+
+    return bucket;
+  }, [dates, shifts]);
+
+  const unassignedByDate = useMemo(() => {
+    const bucket = new Map<string, Location[]>();
+
+    for (const date of dates) {
+      const assignedIds = assignedLocationIdsByDate.get(date) ?? new Set<number>();
+      bucket.set(
+        date,
+        initialLocations
+          .filter((location) => !assignedIds.has(location.id))
+          .sort((left, right) => left.name.localeCompare(right.name))
+      );
+    }
+
+    return bucket;
+  }, [assignedLocationIdsByDate, dates, initialLocations]);
+
+  const weeklyTotals = useMemo(() => {
+    const totals = new Map<number, number>();
+
+    for (const shift of shifts) {
+      totals.set(shift.employee_id, (totals.get(shift.employee_id) ?? 0) + shift.hours);
+    }
+
+    return totals;
+  }, [shifts]);
 
   const selectedAssignment = shifts.find((shift) => shift.id === selectedShiftId) ?? null;
 
@@ -82,14 +143,6 @@ export function QuadrantBoard({
       notes: selectedAssignment.notes ?? ""
     });
   }, [selectedAssignment]);
-
-  const assignedLocationIds = new Set(shiftsForDay.map((shift) => shift.location_id));
-  const unassignedLocations = initialLocations.filter((location) => !assignedLocationIds.has(location.id));
-
-  const weeklyTotals = new Map<number, number>();
-  for (const shift of shifts) {
-    weeklyTotals.set(shift.employee_id, (weeklyTotals.get(shift.employee_id) ?? 0) + shift.hours);
-  }
 
   function saveDragPayload(event: React.DragEvent, payload: DragPayload) {
     event.dataTransfer.setData("application/json", JSON.stringify(payload));
@@ -145,14 +198,20 @@ export function QuadrantBoard({
     }
   }
 
-  async function handleDropOnEmployee(employeeId: number, payload: DragPayload | null) {
+  async function handleDropOnCell(employeeId: number, shiftDate: string, payload: DragPayload | null) {
     if (!databaseReady || !payload) {
       return;
     }
 
     if (payload.kind === "location") {
-      if (assignedLocationIds.has(payload.locationId)) {
-        setStatus("Esa portería ya está asignada hoy.");
+      if (payload.shiftDate !== shiftDate) {
+        setStatus("Arrastra la portería dentro del día correspondiente.");
+        return;
+      }
+
+      const assignedIds = assignedLocationIdsByDate.get(shiftDate) ?? new Set<number>();
+      if (assignedIds.has(payload.locationId)) {
+        setStatus("Esa portería ya está asignada ese día.");
         return;
       }
 
@@ -160,7 +219,7 @@ export function QuadrantBoard({
         action: "assign",
         employee_id: employeeId,
         location_id: payload.locationId,
-        shift_date: selectedDate
+        shift_date: shiftDate
       });
       return;
     }
@@ -168,7 +227,8 @@ export function QuadrantBoard({
     await sendAction({
       action: "move",
       shift_id: payload.assignmentId,
-      employee_id: employeeId
+      employee_id: employeeId,
+      shift_date: shiftDate
     });
   }
 
@@ -204,111 +264,75 @@ export function QuadrantBoard({
       <section className="board-hero">
         <div>
           <p className="eyebrow">Cuadrante semanal</p>
-          <h1>Arrastra cada portería al trabajador adecuado</h1>
+          <h1>Calendario semanal con control total de porterías</h1>
           <p className="hero-copy">
-            Pantalla directa al cuadrante, sin pasos intermedios. Lo libre queda a la izquierda y lo
-            asignado desaparece del listado para evitar duplicados ese mismo día.
+            Ahora cada trabajador ve exactamente qué porterías tiene cada día. Puedes arrastrar,
+            mover entre días o trabajadores, y quitarlas cuando quieras.
           </p>
         </div>
         <div className="hero-actions no-print">
-          <Link className="button button-secondary" href={`/schedule?week=${previousWeek}&day=${previousDay}`}>
+          <Link className="button button-secondary" href={`/schedule?week=${previousWeek}&day=${selectedDate}`}>
             Semana anterior
           </Link>
-          <Link className="button button-secondary" href={`/schedule?week=${nextWeek}&day=${nextDay}`}>
+          <Link className="button button-secondary" href={`/schedule?week=${nextWeek}&day=${selectedDate}`}>
             Semana siguiente
           </Link>
           <PrintButton />
         </div>
       </section>
 
-      <section className="board-toolbar">
-        <div>
-          <p className="eyebrow">Semana activa</p>
-          <strong>{formatWeekRange(weekStart)}</strong>
-        </div>
-
-        <div className="day-tabs no-print">
-          {dates.map((date) => (
-            <Link key={date} className={date === selectedDate ? "day-tab active" : "day-tab"} href={`/schedule?week=${weekStart}&day=${date}`}>
-              <span>{formatDayLabel(date)}</span>
-              <strong>{date.slice(8, 10)}</strong>
-            </Link>
-          ))}
-        </div>
-      </section>
-
       {status ? <p className="inline-status">{status}</p> : null}
 
-      <section className="board-layout">
+      <section className="board-layout board-layout-weekly">
         <aside className="pool-panel no-print" onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
           event.preventDefault();
           void handleDropToPool(readDragPayload(event));
         }}>
           <div className="pool-header">
             <div>
-              <p className="eyebrow">Sin asignar</p>
-              <h2>{unassignedLocations.length} libres</h2>
+              <p className="eyebrow">Porterías libres</p>
+              <h2>Sin asignar por día</h2>
             </div>
-            <span className="helper-pill">Suelta aquí para liberar</span>
+            <span className="helper-pill">Suelta aquí para quitar</span>
           </div>
 
-          <div className="pool-list">
-            {unassignedLocations.length === 0 ? (
-              <p className="empty-state">Todo asignado para este día.</p>
-            ) : (
-              unassignedLocations.map((location) => (
-                <article className="location-pill" draggable={databaseReady} key={location.id} onDragStart={(event) => saveDragPayload(event, { kind: "location", locationId: location.id })}>
-                  <div>
-                    <strong>{location.name}</strong>
-                    <p>{addressLabel(location) || location.type}</p>
-                  </div>
-                  <span>
-                    {location.default_start_time} · {formatHours(location.default_hours)} h
-                  </span>
-                </article>
-              ))
-            )}
-          </div>
-        </aside>
-
-        <div className="lanes-panel">
-          <div className="lane-list">
-            {activeEmployees.map((employee) => {
-              const employeeAssignments = shiftsForDay.filter((shift) => shift.employee_id === employee.id);
+          <div className="weekly-pool-list">
+            {dates.map((date) => {
+              const dayLocations = unassignedByDate.get(date) ?? [];
               return (
-                <section className="worker-lane" key={employee.id} onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
-                  event.preventDefault();
-                  void handleDropOnEmployee(employee.id, readDragPayload(event));
-                }}>
-                  <header className="worker-lane-header">
+                <section className={date === selectedDate ? "day-pool active" : "day-pool"} key={date}>
+                  <div className="day-pool-header">
                     <div>
-                      <h2>{employee.name}</h2>
-                      <p>
-                        Semana: {formatHours(weeklyTotals.get(employee.id) ?? 0)} / {formatHours(employee.weekly_hours)} h
-                      </p>
+                      <strong>{formatDayLabel(date)}</strong>
+                      <p>{date}</p>
                     </div>
-                    <span className="worker-color" style={{ background: employee.color }} />
-                  </header>
+                    <span className="chip">{dayLocations.length}</span>
+                  </div>
 
-                  <div className="assignment-stack">
-                    {employeeAssignments.length === 0 ? (
-                      <div className="assignment-empty">Suelta una portería aquí</div>
+                  <div className="day-pool-cards">
+                    {dayLocations.length === 0 ? (
+                      <p className="empty-state">Todo repartido.</p>
                     ) : (
-                      employeeAssignments.map((shift) => (
-                        <article className={selectedShiftId === shift.id ? "assignment-card active" : "assignment-card"} draggable={databaseReady} key={shift.id} onClick={() => setSelectedShiftId(shift.id)} onDragStart={(event) => saveDragPayload(event, { kind: "assignment", assignmentId: shift.id })}>
-                          <div className="assignment-top">
-                            <strong>{shift.location_name}</strong>
-                            <button className="icon-button no-print" type="button" onClick={(event) => {
-                              event.stopPropagation();
-                              void sendAction({ action: "unassign", shift_id: shift.id });
-                            }}>
-                              x
-                            </button>
+                      dayLocations.map((location) => (
+                        <article
+                          className="location-pill"
+                          draggable={databaseReady}
+                          key={`${date}-${location.id}`}
+                          onDragStart={(event) =>
+                            saveDragPayload(event, {
+                              kind: "location",
+                              locationId: location.id,
+                              shiftDate: date
+                            })
+                          }
+                        >
+                          <div>
+                            <strong>{location.name}</strong>
+                            <p>{addressLabel(location) || location.type}</p>
                           </div>
-                          <p>
-                            {shift.start_time} - {shift.end_time} · {formatHours(shift.hours)} h
-                          </p>
-                          <p>{shift.kind}</p>
+                          <span>
+                            {location.default_start_time} · {formatHours(location.default_hours)} h
+                          </span>
                         </article>
                       ))
                     )}
@@ -317,18 +341,114 @@ export function QuadrantBoard({
               );
             })}
           </div>
+        </aside>
+
+        <div className="lanes-panel weekly-board-panel">
+          <div className="pool-header weekly-panel-header">
+            <div>
+              <p className="eyebrow">Calendario</p>
+              <h2>{formatWeekRange(weekStart)}</h2>
+            </div>
+          </div>
+
+          <div className="week-table-wrap">
+            <table className="week-table">
+              <thead>
+                <tr>
+                  <th className="worker-column">Trabajador</th>
+                  {dates.map((date) => (
+                    <th className={date === selectedDate ? "calendar-day-header active" : "calendar-day-header"} key={date}>
+                      <span>{formatDayLabel(date)}</span>
+                      <strong>{date}</strong>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {activeEmployees.map((employee) => (
+                  <tr key={employee.id}>
+                    <th className="calendar-worker-cell" scope="row">
+                      <div>
+                        <strong>{employee.name}</strong>
+                        <p>
+                          {formatHours(weeklyTotals.get(employee.id) ?? 0)} / {formatHours(employee.weekly_hours)} h
+                        </p>
+                      </div>
+                      <span className="worker-color" style={{ background: employee.color }} />
+                    </th>
+
+                    {dates.map((date) => {
+                      const assignments = shiftsByEmployeeDay.get(`${employee.id}-${date}`) ?? [];
+                      return (
+                        <td
+                          className={date === selectedDate ? "calendar-drop-cell active" : "calendar-drop-cell"}
+                          key={`${employee.id}-${date}`}
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            void handleDropOnCell(employee.id, date, readDragPayload(event));
+                          }}
+                        >
+                          <div className="calendar-cell-stack">
+                            {assignments.length === 0 ? (
+                              <div className="assignment-empty">Arrastra aquí</div>
+                            ) : (
+                              assignments.map((shift) => (
+                                <article
+                                  className={selectedShiftId === shift.id ? "assignment-card active" : "assignment-card"}
+                                  draggable={databaseReady}
+                                  key={shift.id}
+                                  onClick={() => setSelectedShiftId(shift.id)}
+                                  onDragStart={(event) =>
+                                    saveDragPayload(event, {
+                                      kind: "assignment",
+                                      assignmentId: shift.id
+                                    })
+                                  }
+                                >
+                                  <div className="assignment-top">
+                                    <strong>{shift.location_name}</strong>
+                                    <button
+                                      className="icon-button no-print"
+                                      type="button"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        void sendAction({ action: "unassign", shift_id: shift.id });
+                                      }}
+                                    >
+                                      x
+                                    </button>
+                                  </div>
+                                  <p>{shift.location_street ?? shift.location_type}</p>
+                                  <p>
+                                    {shift.start_time} - {shift.end_time} · {formatHours(shift.hours)} h
+                                  </p>
+                                </article>
+                              ))
+                            )}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <aside className="details-panel">
           <div className="pool-header">
             <div>
               <p className="eyebrow">Detalle</p>
-              <h2>{selectedAssignment ? selectedAssignment.location_name : "Selecciona una asignación"}</h2>
+              <h2>{selectedAssignment ? selectedAssignment.location_name : "Selecciona una portería"}</h2>
             </div>
           </div>
 
           {!selectedAssignment || !editor ? (
-            <p className="empty-state">Haz clic en una asignación para editar horario y observaciones.</p>
+            <p className="empty-state">
+              Haz clic en una portería asignada para cambiar horario, horas y observaciones.
+            </p>
           ) : (
             <form className="form-grid details-form" onSubmit={handleSaveEditor}>
               <label className="span-2">
@@ -336,34 +456,83 @@ export function QuadrantBoard({
                 <input disabled value={selectedAssignment.employee_name} />
               </label>
 
+              <label className="span-2">
+                Día
+                <input disabled value={selectedAssignment.shift_date} />
+              </label>
+
               <label>
                 Inicio
-                <input disabled={busy} type="time" value={editor.start_time} onChange={(event) => setEditor((current) => current ? { ...current, start_time: event.target.value } : current)} />
+                <input
+                  disabled={busy}
+                  type="time"
+                  value={editor.start_time}
+                  onChange={(event) =>
+                    setEditor((current) => (current ? { ...current, start_time: event.target.value } : current))
+                  }
+                />
               </label>
 
               <label>
                 Fin
-                <input disabled={busy} type="time" value={editor.end_time} onChange={(event) => setEditor((current) => current ? { ...current, end_time: event.target.value } : current)} />
+                <input
+                  disabled={busy}
+                  type="time"
+                  value={editor.end_time}
+                  onChange={(event) =>
+                    setEditor((current) => (current ? { ...current, end_time: event.target.value } : current))
+                  }
+                />
               </label>
 
               <label>
                 Horas
-                <input disabled={busy} min="0" step="0.5" type="number" value={editor.hours} onChange={(event) => setEditor((current) => current ? { ...current, hours: event.target.value } : current)} />
+                <input
+                  disabled={busy}
+                  min="0"
+                  step="0.5"
+                  type="number"
+                  value={editor.hours}
+                  onChange={(event) =>
+                    setEditor((current) => (current ? { ...current, hours: event.target.value } : current))
+                  }
+                />
               </label>
 
               <label>
                 Servicio
-                <input disabled={busy} value={editor.kind} onChange={(event) => setEditor((current) => current ? { ...current, kind: event.target.value } : current)} />
+                <input
+                  disabled={busy}
+                  value={editor.kind}
+                  onChange={(event) =>
+                    setEditor((current) => (current ? { ...current, kind: event.target.value } : current))
+                  }
+                />
               </label>
 
               <label className="span-2">
                 Observaciones
-                <textarea disabled={busy} rows={5} value={editor.notes} onChange={(event) => setEditor((current) => current ? { ...current, notes: event.target.value } : current)} />
+                <textarea
+                  disabled={busy}
+                  rows={5}
+                  value={editor.notes}
+                  onChange={(event) =>
+                    setEditor((current) => (current ? { ...current, notes: event.target.value } : current))
+                  }
+                />
               </label>
 
               <div className="form-actions span-2">
                 <button className="button" disabled={busy || !databaseReady} type="submit">
                   Guardar detalle
+                </button>
+                <button
+                  className="button button-secondary"
+                  disabled={busy || !databaseReady}
+                  type="button"
+                  onClick={() => void sendAction({ action: "unassign", shift_id: editor.shift_id })}
+                >
+                  Quitar portería
                 </button>
               </div>
             </form>
